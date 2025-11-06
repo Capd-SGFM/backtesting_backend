@@ -6,3 +6,5 @@ pandas
 python-dotenv
 pytest
 httpx
+asyncpg
+python-jose[cryptography]

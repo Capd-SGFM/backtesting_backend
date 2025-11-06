@@ -81,3 +81,33 @@ def get_sync_db() -> Iterator:
 async def get_async_db() -> AsyncIterator[AsyncSession]:
     async with AsyncSessionLocal() as session:
         yield session
+
+
+class DBConnectionManager:
+    """싱글톤 성격의 엔진 보관소"""
+
+    _sync_engine = None
+    _async_engine = None
+
+    @classmethod
+    def get_sync_engine(cls):
+        if cls._sync_engine is None:
+            from sqlalchemy import create_engine
+
+            cls._sync_engine = create_engine(SYNC_URL, pool_pre_ping=True)
+        return cls._sync_engine
+
+    @classmethod
+    def get_sync_session(cls):
+        """동기 세션을 반환"""
+        engine = cls.get_sync_engine()
+        SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
+        return SessionLocal()
+
+    @classmethod
+    def get_async_engine(cls):
+        if cls._async_engine is None:
+            from sqlalchemy.ext.asyncio import create_async_engine
+
+            cls._async_engine = create_async_engine(ASYNC_URL, pool_pre_ping=True)
+        return cls._async_engine
