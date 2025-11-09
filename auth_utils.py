@@ -29,7 +29,15 @@ def verify_token(token: str = Depends(oauth2_scheme)) -> TokenData:
     내부 Payload에서 사용자 정보를 추출한다.
     """
     try:
-        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        payload = jwt.decode(
+            token,
+            JWT_SECRET,
+            algorithms=[JWT_ALGORITHM],
+            options={
+                "require_exp": True,  # 만료 필드 필수
+                "verify_signature": True,  # ✅ 명시적으로 서명 검증 활성화
+            },
+        )
         return TokenData(
             id=payload.get("id"),
             sub=payload.get("sub"),
