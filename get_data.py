@@ -1,5 +1,7 @@
 import pandas as pd
 import numpy as np
+from binance_client import fetch_klines
+from datetime import datetime, timezone  # 시간 변환용
 from sqlalchemy import text
 from db_module.connect_sqlalchemy_engine import DBConnectionManager
 
