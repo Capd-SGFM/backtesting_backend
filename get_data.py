@@ -157,3 +157,75 @@ def get_filtered_data(google_id: str | None = None) -> list:
     df.replace([np.inf, -np.inf], np.nan, inplace=True)
     df.dropna(how="any", inplace=True)
     return df.to_dict(orient="records")
+
+def insert_ohlcv_rows(schema: str, table_name: str, rows: list[dict]) -> None:
+    """
+    OHLCV dict 리스트를 해당 테이블에 INSERT
+    rows 예시:
+    {
+        "timestamp": datetime,
+        "open": 123.4,
+        "high": 125.0,
+        "low": 120.0,
+        "close": 124.5,
+        "volume": 1000.0,
+    }
+    """
+    if not rows:
+        print("⚠️ 삽입할 데이터가 없습니다.")
+        return
+
+    full_table = f"{schema}.{table_name}"
+
+    sql = text(f"""
+        INSERT INTO {full_table} ("timestamp", "open", "high", "low", "close", "volume")
+        VALUES (:timestamp, :open, :high, :low, :close, :volume)
+        ON CONFLICT ("timestamp") DO NOTHING;
+        -- ↑ PK/UNIQUE 조합에 맞게 필요하면 수정
+    """)
+
+    with engine.begin() as conn:  # 자동 commit
+        conn.execute(sql, rows)
+
+    print(f"✅ {len(rows)} rows inserted into {full_table}")
+
+
+def save_binance_ohlcv(
+    symbol: str,
+    interval: str = "1m",
+    limit: int = 500,
+    schema: str = "trading_data",
+):
+    """
+    Binance USD-M 선물에서 OHLCV 불러와서
+    trading_data.ohlcv_{interval} 테이블에 저장
+    """
+    # 1) Binance 에서 캔들 가져오기
+    candles = fetch_klines(symbol, interval, limit)
+    print(f"📥 Binance에서 가져온 캔들 수: {len(candles)}")
+
+    # 2) DB에 맞는 형태로 변환
+    rows: list[dict] = []
+    for c in candles:
+        # open_time(ms)를 Python datetime으로 변환
+        ts = datetime.fromtimestamp(c["open_time"] / 1000, tz=timezone.utc)
+
+        rows.append(
+            {
+                "timestamp": ts,
+                "open": c["open"],
+                "high": c["high"],
+                "low": c["low"],
+                "close": c["close"],
+                "volume": c["volume"],
+            }
+        )
+
+    table_name = f"ohlcv_{interval}".lower()
+
+    # 3) INSERT 실행
+    insert_ohlcv_rows(schema, table_name, rows)
+
+if __name__ == "__main__":
+    # 예시: BTCUSDT 1분봉 500개 저장
+    save_binance_ohlcv("BTCUSDT", "1m", 500)
