@@ -3,7 +3,7 @@ import numpy as np
 from sqlalchemy import text
 from db_module.connect_sqlalchemy_engine import DBConnectionManager
 
-# ======== DB 연결 ========
+# ======== DB 연결 ======== #
 engine = DBConnectionManager.get_sync_engine()
 
 

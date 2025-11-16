@@ -16,7 +16,7 @@ from auth_utils import verify_token, TokenData
 
 
 # =========================
-# 🔹 DB 엔진 연결
+# 🔹 DB 엔진 연결 ###
 # =========================
 db_manager = DBConnectionManager()
 engine = db_manager.get_sync_engine()
