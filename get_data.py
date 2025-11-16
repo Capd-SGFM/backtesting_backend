@@ -8,7 +8,7 @@ engine = DBConnectionManager.get_sync_engine()
 
 
 # ==============================
-# 문자열 포맷 도우미
+# 문자열 포맷 도우미 ###
 # ==============================
 def wrap_strs_with_quote(x: str | list[str]) -> str:
     """컬럼명을 SQL용 큰따옴표로 감싸기"""
