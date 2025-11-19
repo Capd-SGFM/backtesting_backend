@@ -155,5 +155,9 @@ def get_filtered_data(google_id: str | None = None) -> list:
         return []
 
     df.replace([np.inf, -np.inf], np.nan, inplace=True)
-    df.dropna(how="any", inplace=True)
+    # df.dropna(how="any", inplace=True)  <-- ⚠️ This was dropping rows with NULLs (e.g. exit_time, start_time)
+    
+    # Replace NaN with None for JSON compatibility
+    df = df.where(pd.notnull(df), None)
+    
     return df.to_dict(orient="records")

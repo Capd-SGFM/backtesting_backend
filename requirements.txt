@@ -8,3 +8,4 @@ pytest
 httpx
 asyncpg
 python-jose[cryptography]
+requests

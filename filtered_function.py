@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 from sqlalchemy import text
 from db_module.connect_sqlalchemy_engine import DBConnectionManager
+from slippage_models import FixedSlippageModel
 
 # ======== DB 연결 ======== #
 engine = DBConnectionManager.get_sync_engine()
@@ -16,17 +17,20 @@ def run_conditional_lateral_backtest(
     stop_loss_value: float | None = None,
     start_time: str = None,
     end_time: str = None,
+    position_side: str = "LONG",
+    leverage: float = 1.0,
+    slippage_rate: float = 0.0,
 ) -> pd.DataFrame:
     """
     trading_data 스키마 기반 백테스트
-    - OHLCV + Indicators 테이블 조인
-    - stop_loss_type='low' → e.low 기준
-    - stop_loss_type='custom' → 사용자가 지정한 stop_loss_value 고정
+    - OHLCV + Indicators + StopLoss 테이블 조인
+    - stop_loss_type: 'low' | 'custom' | 'long_min_low_5' etc.
     """
 
     # --- 테이블 이름 ---
     ohlcv_table = f"trading_data.ohlcv_{interval}".lower()
     indi_table = f"trading_data.indicators_{interval}".lower()
+    sl_table = f"trading_data.stop_loss_{interval}".lower()
 
     # --- 사용된 보조지표 감지 ---
     groups = [
@@ -44,12 +48,41 @@ def run_conditional_lateral_backtest(
         " and ".join(sorted(used_indicators)) if used_indicators else "None"
     )
 
-    # --- 손절가 설정 ---
-    if stop_loss_type == "low":
-        stop_loss_expr = "e.low"
-    else:
-        # custom stop_loss
+    # --- Stop Loss Expression 결정 ---
+    # 1. Custom Value
+    if stop_loss_type == "custom":
         stop_loss_expr = str(stop_loss_value or 0.0)
+        
+    # 2. Dynamic Column (Pre-calculated)
+    elif stop_loss_type in ["long_min_low_5", "long_min_low_20", "short_max_high_5", "short_max_high_20", "long_atr_2", "short_atr_2"]:
+        stop_loss_expr = f"e.{stop_loss_type}"
+        
+    # 3. Default 'low'/'high' (Legacy)
+    else:
+        if position_side.upper() == "LONG":
+            stop_loss_expr = "e.low"
+        else:
+            stop_loss_expr = "e.high"
+
+    # --- LONG / SHORT 로직 분기 ---
+    if position_side.upper() == "LONG":
+        # LONG: SL < Entry, TP > Entry
+        # TP = Entry + (Entry - SL) * RR
+        take_profit_expr = f"e.close + (e.close - ({stop_loss_expr})) * :rr_ratio"
+        
+        # Exit 조건: Low <= SL (손절), High >= TP (익절)
+        sl_condition = f"x.low <= ({stop_loss_expr})"
+        tp_condition = f"x.high >= ({take_profit_expr})"
+        
+    else:
+        # SHORT: SL > Entry, TP < Entry
+        # TP = Entry - (SL - Entry) * RR
+        take_profit_expr = f"e.close - (({stop_loss_expr}) - e.close) * :rr_ratio"
+
+        # Exit 조건: High >= SL (손절), Low <= TP (익절)
+        sl_condition = f"x.high >= ({stop_loss_expr})"
+        tp_condition = f"x.low <= ({take_profit_expr})"
+
 
     # --- 기간 필터 SQL ---
     time_conditions = []
@@ -60,17 +93,18 @@ def run_conditional_lateral_backtest(
     time_filter_sql = " AND " + " AND ".join(time_conditions) if time_conditions else ""
 
     # --- 핵심 쿼리 ---
+    # LEFT JOIN stop_loss table
     query = f"""
     SELECT
-        e.timestamp AS entry_time,
+        e.unique_entry_time AS entry_time,
         e.close AS entry_price,
         ({stop_loss_expr}) AS stop_loss,
-        e.close + (e.close - ({stop_loss_expr})) * :rr_ratio AS take_profit,
+        ({take_profit_expr}) AS take_profit,
         x.timestamp AS exit_time,
         CASE
             WHEN x.timestamp IS NULL THEN 'OPEN'
-            WHEN x.low <= ({stop_loss_expr}) THEN 'SL'
-            WHEN x.high >= (e.close + (e.close - ({stop_loss_expr})) * :rr_ratio) THEN 'TP'
+            WHEN {sl_condition} THEN 'SL'
+            WHEN {tp_condition} THEN 'TP'
             ELSE 'UNKNOWN'
         END AS result,
         :symbol AS symbol,
@@ -78,19 +112,20 @@ def run_conditional_lateral_backtest(
         '{strategy_sql}' AS strategy,
         '{what_indicators_str}' AS what_indicators
     FROM (
-        SELECT o.timestamp, o.close, o.low
+        SELECT o.timestamp AS unique_entry_time, o.close, o.low, o.high, sl.*
         FROM {ohlcv_table} AS o
         JOIN {indi_table} AS i USING (symbol, timestamp)
+        LEFT JOIN {sl_table} AS sl USING (symbol, timestamp)
         WHERE {strategy_sql}
         {time_filter_sql}
     ) e
     LEFT JOIN LATERAL (
         SELECT x.timestamp, x.low, x.high
         FROM {ohlcv_table} AS x
-        WHERE x.timestamp > e.timestamp
+        WHERE x.timestamp > e.unique_entry_time
           AND (
-              x.low <= ({stop_loss_expr})
-              OR x.high >= (e.close + (e.close - ({stop_loss_expr})) * :rr_ratio)
+              {sl_condition}
+              OR {tp_condition}
           )
         ORDER BY x.timestamp
         LIMIT 1
@@ -112,15 +147,43 @@ def run_conditional_lateral_backtest(
     if df.empty:
         return df
 
-    # --- 수익률 계산 ---
+    # --- 슬리피지 모델 적용 ---
+    slippage_model = FixedSlippageModel(slippage_rate)
+    
+    if position_side.upper() == "LONG":
+        df["real_entry_price"] = df["entry_price"] * (1 + slippage_rate)
+    else:
+        df["real_entry_price"] = df["entry_price"] * (1 - slippage_rate)
+
+    # --- 수익률 계산 (레버리지 포함) ---
     df["profit_rate"] = 0.0
-    non_zero = df["entry_price"] != 0
-    df.loc[(df["result"] == "TP") & non_zero, "profit_rate"] = (
-        df["take_profit"] - df["entry_price"]
-    ) / df["entry_price"]
-    df.loc[(df["result"] == "SL") & non_zero, "profit_rate"] = (
-        df["stop_loss"] - df["entry_price"]
-    ) / df["entry_price"]
+    non_zero = df["real_entry_price"] != 0
+    
+    if position_side.upper() == "LONG":
+        exit_slippage_factor = (1 - slippage_rate)
+        # TP
+        df.loc[(df["result"] == "TP") & non_zero, "profit_rate"] = (
+            (df["take_profit"] * exit_slippage_factor - df["real_entry_price"]) 
+            / df["real_entry_price"]
+        ) * leverage
+        # SL
+        df.loc[(df["result"] == "SL") & non_zero, "profit_rate"] = (
+            (df["stop_loss"] * exit_slippage_factor - df["real_entry_price"]) 
+            / df["real_entry_price"]
+        ) * leverage
+    else:
+        exit_slippage_factor = (1 + slippage_rate)
+        # SHORT Profit = (Entry - Exit) / Entry
+        # TP
+        df.loc[(df["result"] == "TP") & non_zero, "profit_rate"] = (
+            (df["real_entry_price"] - df["take_profit"] * exit_slippage_factor) 
+            / df["real_entry_price"]
+        ) * leverage
+        # SL
+        df.loc[(df["result"] == "SL") & non_zero, "profit_rate"] = (
+            (df["real_entry_price"] - df["stop_loss"] * exit_slippage_factor) 
+            / df["real_entry_price"]
+        ) * leverage
 
     # --- 중복 제거 (entry_time + exit_time 기준) ---
     df = df.drop_duplicates(subset=["entry_time", "exit_time"], keep="first")
@@ -150,6 +213,7 @@ def save_result_to_table(data: pd.DataFrame):
         return
 
     table_name = "trading_data.filtered"
+    
     create_table_query = f"""
     CREATE TABLE IF NOT EXISTS {table_name} (
         entry_time TIMESTAMPTZ PRIMARY KEY,
@@ -163,7 +227,8 @@ def save_result_to_table(data: pd.DataFrame):
         strategy TEXT,
         what_indicators TEXT,
         profit_rate DOUBLE PRECISION,
-        cum_profit_rate DOUBLE PRECISION
+        cum_profit_rate DOUBLE PRECISION,
+        real_entry_price DOUBLE PRECISION
     );
     """
 

@@ -53,6 +53,9 @@ class StrategyRequest(BaseModel):
     stop_loss_value: Optional[float] = None
     start_time: Optional[str] = None
     end_time: Optional[str] = None
+    position_side: str = "LONG"
+    leverage: float = 1.0
+    slippage_rate: float = 0.0
 
 
 # =========================
@@ -83,6 +86,9 @@ def save_strategy(
             stop_loss_value=req.stop_loss_value,
             start_time=req.start_time,
             end_time=req.end_time,
+            position_side=req.position_side,
+            leverage=req.leverage,
+            slippage_rate=req.slippage_rate,
         )
 
         if df.empty:
@@ -97,13 +103,15 @@ def save_strategy(
                         google_id, symbol, interval, strategy_sql, risk_reward_ratio,
                         stop_loss_type, stop_loss_value,
                         start_time, end_time, entry_time, exit_time, result,
-                        profit_rate, cum_profit_rate, created_at, updated_at
+                        profit_rate, cum_profit_rate, created_at, updated_at,
+                        position_side, leverage
                     )
                     VALUES (
                         :google_id, :symbol, :interval, :strategy_sql, :risk_reward_ratio,
                         :stop_loss_type, :stop_loss_value,
                         :start_time, :end_time, :entry_time, :exit_time, :result,
-                        :profit_rate, :cum_profit_rate, NOW(), NOW()
+                        :profit_rate, :cum_profit_rate, NOW(), NOW(),
+                        :position_side, :leverage
                     )
                     ON CONFLICT (google_id, symbol, interval, start_time, entry_time)
                     DO UPDATE SET
@@ -113,7 +121,9 @@ def save_strategy(
                         cum_profit_rate = EXCLUDED.cum_profit_rate,
                         stop_loss_type = EXCLUDED.stop_loss_type,
                         stop_loss_value = EXCLUDED.stop_loss_value,
-                        updated_at = NOW();
+                        updated_at = NOW(),
+                        position_side = EXCLUDED.position_side,
+                        leverage = EXCLUDED.leverage;
                     """
                 )
                 conn.execute(
@@ -128,6 +138,8 @@ def save_strategy(
                         "stop_loss_value": req.stop_loss_value,
                         "start_time": req.start_time,
                         "end_time": req.end_time,
+                        "position_side": req.position_side,
+                        "leverage": req.leverage,
                         **row.to_dict(),
                     },
                 )
@@ -207,7 +219,23 @@ def get_symbols():
         with db_manager.get_sync_session() as session:
             query = text("SELECT symbol FROM metadata.crypto_info ORDER BY symbol ASC;")
             result = session.execute(query).fetchall()
-            return {"symbols": [r[0] for r in result]}
+            symbols = [r[0] for r in result]
+            
+            # ⚠️ DB가 비어있거나 연결 실패 시 Fallback
+            if not symbols:
+                print("⚠️ metadata.crypto_info is empty. Checking public.crypto_info...")
+                try:
+                    query_public = text("SELECT symbol FROM public.crypto_info ORDER BY symbol ASC;")
+                    result_public = session.execute(query_public).fetchall()
+                    symbols = [r[0] for r in result_public]
+                except Exception as e:
+                    print(f"⚠️ public.crypto_info query failed: {e}")
+
+            if not symbols:
+                print("⚠️ DB symbol list is empty. Using fallback.")
+                return {"symbols": ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT"]}
+                
+            return {"symbols": symbols}
     except Exception as e:
         print("❌ Error in get_symbols:", repr(e))
         raise HTTPException(status_code=500, detail="심볼 목록 조회 실패")
@@ -216,14 +244,66 @@ def get_symbols():
 # =========================
 # 7️⃣ Interval 목록 조회
 # =========================
+@app.get("/debug_db")
+def debug_db():
+    results = {}
+    try:
+        with db_manager.get_sync_session() as session:
+            # Check metadata schema
+            try:
+                cnt = session.execute(text("SELECT count(*) FROM metadata.crypto_info")).scalar()
+                rows = session.execute(text("SELECT symbol FROM metadata.crypto_info LIMIT 5")).fetchall()
+                results["metadata_count"] = cnt
+                results["metadata_sample"] = [r[0] for r in rows]
+            except Exception as e:
+                results["metadata_error"] = str(e)
+
+            # Check public schema
+            try:
+                cnt = session.execute(text("SELECT count(*) FROM public.crypto_info")).scalar()
+                rows = session.execute(text("SELECT symbol FROM public.crypto_info LIMIT 5")).fetchall()
+                results["public_count"] = cnt
+                results["public_sample"] = [r[0] for r in rows]
+            except Exception as e:
+                results["public_error"] = str(e)
+                
+            # Check connection info
+            results["db_url"] = str(session.bind.url).replace(":", "***")
+            
+    except Exception as e:
+        results["connection_error"] = str(e)
+        
+    return results
+
 @app.get("/intervals")
 def get_intervals():
     try:
-        # ⚙️ 필요한 interval 확장 가능
-        return ["1h", "4h", "1d"]
+        # ⚙️ 스키마에 정의된 모든 interval 반환
+        return ["1m", "3m", "5m", "15m", "30m", "1h", "4h", "1d", "1w", "1M"]
     except Exception as e:
         print("❌ Error in get_intervals:", repr(e))
         raise HTTPException(status_code=500, detail="Interval 조회 실패")
+
+
+# =========================
+# 10️⃣ Stop Loss Options 조회
+# =========================
+@app.get("/sl-options")
+def get_sl_options():
+    return {
+        "long": [
+            {"value": "low", "label": "전봉 저가 (Low)"},
+            {"value": "long_min_low_5", "label": "최근 5봉 최저가"},
+            {"value": "long_min_low_20", "label": "최근 20봉 최저가"},
+            {"value": "long_atr_2", "label": "ATR 2배 (Long)"},
+        ],
+        "short": [
+            {"value": "high", "label": "전봉 고가 (High)"},
+            {"value": "short_max_high_5", "label": "최근 5봉 최고가"},
+            {"value": "short_max_high_20", "label": "최근 20봉 최고가"},
+            {"value": "short_atr_2", "label": "ATR 2배 (Short)"},
+        ],
+    }
 
 
 # =========================
