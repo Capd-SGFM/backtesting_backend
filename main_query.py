@@ -322,11 +322,17 @@ def root():
 @app.get("/time-range/{symbol}/{interval}")
 def get_time_range(symbol: str, interval: str):
     """
-    trading_data.ohlcv_{interval} 테이블에서
+    trading_data.indicators_{interval} 테이블에서
     해당 symbol의 timestamp 최소/최대 범위를 조회합니다.
+    
+    ⚠️ OHLCV가 아닌 indicators 테이블 기준으로 조회하여,
+    보조지표가 계산된 데이터만 백테스팅에 사용되도록 보장합니다.
     """
     try:
-        table = f"trading_data.ohlcv_{interval}"
+        # PostgreSQL은 따옴표로 감싸지 않으면 소문자로 변환하므로,
+        # 테이블명을 따옴표로 감싸서 대소문자를 정확히 매칭
+        table_name = f"indicators_{interval}"
+        
         with engine.connect() as conn:
             result = conn.execute(
                 text(
@@ -334,7 +340,7 @@ def get_time_range(symbol: str, interval: str):
                     SELECT 
                         MIN("timestamp") AS min_time,
                         MAX("timestamp") AS max_time
-                    FROM {table}
+                    FROM trading_data."{table_name}"
                     WHERE symbol = :symbol
                     """
                 ),
@@ -342,7 +348,7 @@ def get_time_range(symbol: str, interval: str):
             ).fetchone()
 
         if not result or not result.min_time or not result.max_time:
-            raise HTTPException(status_code=404, detail="데이터가 없습니다.")
+            raise HTTPException(status_code=404, detail=f"{interval} 보조지표 데이터가 없습니다.")
 
         return {
             "symbol": symbol,
@@ -351,6 +357,8 @@ def get_time_range(symbol: str, interval: str):
             "max_time": str(result.max_time),
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
-        print("❌ Error in get_time_range:", repr(e))
-        raise HTTPException(status_code=500, detail="시간 범위 조회 실패")
+        print(f"❌ Error in get_time_range ({symbol}, {interval}):", repr(e))
+        raise HTTPException(status_code=500, detail=f"시간 범위 조회 실패: {e}")
