@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 from sqlalchemy import text
 from db_module.connect_sqlalchemy_engine import DBConnectionManager
-from slippage_models import FixedSlippageModel
+# from slippage_models import FixedSlippageModel
 
 # ======== DB 연결 ======== #
 engine = DBConnectionManager.get_sync_engine()
@@ -148,7 +148,7 @@ def run_conditional_lateral_backtest(
         return df
 
     # --- 슬리피지 모델 적용 ---
-    slippage_model = FixedSlippageModel(slippage_rate)
+    # slippage_model = FixedSlippageModel(slippage_rate)
     
     if position_side.upper() == "LONG":
         df["real_entry_price"] = df["entry_price"] * (1 + slippage_rate)
